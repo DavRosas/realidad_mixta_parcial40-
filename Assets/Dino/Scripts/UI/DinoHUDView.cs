@@ -17,8 +17,8 @@ namespace DinoVehicle
         const float RIEL = 420f;
 
         Canvas canvas;
-        TextMeshProUGUI velocidad, estadoRugido, energiaTxt, arduinoTxt;
-        Image relleno, zonaTurbo, marcaMax, rugido, energia, puntoArduino;
+        TextMeshProUGUI velocidad, estadoRugido, energiaTxt, arduinoTxt, manosTxt;
+        Image relleno, zonaTurbo, marcaMax, rugido, energia, puntoArduino, puntoManos;
         float inicioTurbo = -999f;
         bool turboAntes;
 
@@ -69,6 +69,8 @@ namespace DinoVehicle
 
             puntoArduino = Rect(raiz, "Punto Arduino", 80, 60, 10, 10, Gris);
             arduinoTxt = Texto(raiz, "Arduino", 100, 52, 700, 26, "", Semi, 17, Gris, 300);
+            puntoManos = Rect(raiz, "Punto Manos", 80, 90, 10, 10, Gris);
+            manosTxt = Texto(raiz, "Manos", 100, 82, 700, 26, "", Semi, 17, Gris, 300);
 
             BarraTeclas(raiz, ("ESC", "PAUSA"));
             Imagen(Estirar(raiz, "Grano"), Sprite("grano"), Alfa(Color.white, 0.35f));
@@ -133,6 +135,13 @@ namespace DinoVehicle
             bool con = ard != null && ard.IsConnected;
             arduinoTxt.text = con ? $"ARDUINO CONECTADO · {ard.portName}" : "ARDUINO DESCONECTADO · TECLADO";
             puntoArduino.color = con ? Sangre : Gris;
+
+            // Control por manos (MediaPipe)
+            bool manos = MediaPipeHandReceiver.Conectado;
+            manosTxt.text = manos ? $"MANOS: CONECTADAS · {MediaPipeHandReceiver.ManosDetectadas}"
+                          : MediaPipeHandReceiver.RecibiendoDatos ? "SIN MANOS · CÁMARA ACTIVA" : "SIN MANOS";
+            manosTxt.color = manos ? Hueso : Gris;
+            puntoManos.color = manos ? Sangre : Gris;
         }
     }
 }

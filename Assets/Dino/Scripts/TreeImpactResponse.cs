@@ -200,7 +200,7 @@ namespace DinoVehicle
 
         static bool IsTreeRoot(Transform tree)
         {
-            if (!IsTreeName(tree.name))
+            if (!IsTreeName(tree.name) || IsAnimalPart(tree))
             {
                 return false;
             }
@@ -218,8 +218,24 @@ namespace DinoVehicle
             return tree.GetComponentInChildren<Renderer>() != null;
         }
 
+        /// <summary>
+        /// Huesos y piezas de dinosaurios (jugador o fauna) nunca son árboles: el hueso "Spine"
+        /// contiene "pine" y se convertía en un árbol con TreeReaction que estiraba el torso.
+        /// </summary>
+        static bool IsAnimalPart(Transform t)
+        {
+            return t.GetComponentInParent<Animator>(true) != null
+                || t.GetComponentInParent<DinoVehicleController>(true) != null
+                || t.GetComponentInParent<DinoAIHerbivore>(true) != null
+                || t.GetComponentInParent<DinoAIRaptor>(true) != null;
+        }
+
         static bool IsTreeName(string name)
         {
+            if (name.IndexOf("Spine", System.StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return false;
+            }
             if (name.IndexOf("LOD", System.StringComparison.Ordinal) >= 0 ||
                 name.IndexOf("Arboleda", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
                 name.IndexOf("Arboles", System.StringComparison.OrdinalIgnoreCase) >= 0)
@@ -364,6 +380,10 @@ namespace DinoVehicle
             if (collider.GetComponentInParent<TreeReaction>() != null)
             {
                 return true;
+            }
+            if (IsAnimalPart(collider.transform))
+            {
+                return false;
             }
 
             Transform current = collider.transform;

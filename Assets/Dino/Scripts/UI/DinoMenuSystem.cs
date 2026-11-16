@@ -75,6 +75,7 @@ namespace DinoVehicle
             Instancia = this;
             SimulationSettings.Cargar();
             Construir();
+            DinoHandCursor.Crear(this); // puntero con la mano (MediaPipe); ratón y teclado siguen igual
             SceneManager.sceneLoaded += AlCargarEscena;
             canvas.enabled = false;
         }
@@ -477,7 +478,8 @@ namespace DinoVehicle
             if (capturando) return;
             if (!Abierto)
             {
-                if (Input.GetKeyDown(KeyCode.Escape) || Input.GetKeyDown(KeyCode.P))
+                // ESC/P, o pellizco mantenido 1 s con la mano izquierda (MediaPipe).
+                if (Input.GetKeyDown(KeyCode.Escape) || Input.GetKeyDown(KeyCode.P) || MediaPipeHandReceiver.ConsumirPausa())
                     StartCoroutine(AbrirDesdeJuego(Estado.Pausa, 0));
                 return;
             }

@@ -3,147 +3,333 @@ using UnityEngine;
 namespace DinoVehicle
 {
     /// <summary>
-    /// IA para los Velociraptores en manada del ecosistema.
-    /// Acechan en las inmediaciones, se mueven con agilidad felina y se dispersan
-    /// velozmente si el gran Carnotauro embiste a toda carrera o ruge.
+    /// IA de Velociraptores en manada.
+    /// - Patrullan su llanura siguiendo al líder; olfatean el suelo (Sniff), descansan (Idle/Idle2) o duermen (Sleep).
+    /// - Al detectar al jugador lo rodean a distancia (Circling) y de vez en cuando uno lo amenaza (Roar/Call/Attack).
+    /// - Si el jugador ruge, embiste rápido o se acerca demasiado, se dispersan corriendo y luego se reagrupan.
+    /// El modelo PBR del Velociraptor mira hacia -Z: frenteInvertido = true.
     /// </summary>
-    public class DinoAIRaptor : MonoBehaviour
+    public class DinoAIRaptor : DinoAIBase
     {
-        public enum RaptorState { Stalking, Circling, Scattering }
+        public enum RaptorState { Patrullar, Olfatear, Descansar, Dormir, Despertar, Rodear, Amenazar, Dispersarse, Reagrupar }
 
         [Header("Comportamiento Raptor")]
-        [SerializeField] RaptorState currentState = RaptorState.Stalking;
-        [SerializeField] float stalkSpeed = 3.2f;
-        [SerializeField] float sprintSpeed = 12.0f;
-        [SerializeField] float alertDistance = 18f;
-        [Tooltip("El modelo PBR del Velociraptor viene mirando hacia -Z; activo = avanza hacia donde mira la cabeza")]
-        [SerializeField] bool frenteInvertido = true;
+        [SerializeField] RaptorState currentState = RaptorState.Patrullar;
+        public float radioPatrulla = 30f;
+        [Tooltip("Distancia a la que detectan al jugador y empiezan a rodearlo")]
+        public float distanciaDeteccion = 45f;
+        [Tooltip("Radio del círculo alrededor del jugador")]
+        public float radioRodeo = 16f;
+        [Tooltip("Si el jugador viene embalado dentro de esta distancia, se dispersan")]
+        public float alertDistance = 20f;
+        [Tooltip("Distancia mínima: más cerca se dispersan aunque el jugador vaya despacio")]
+        public float distanciaPanico = 7f;
 
-        Vector3 originPos;
-        Vector3 targetPos;
-        float stateTimer = 0f;
+        [Header("Manada")]
+        public DinoAIRaptor lider;
+        public Vector3 offsetManada;
+        public Vector3 centroTerritorio;
+        public bool centroAsignado;
+        public int indiceManada;
 
-        Animator animator;
-        DinoVehicleController player;
+        float timer;
+        float duracion;
+        Vector3 destino;
+        Vector3 dirHuida;
+        float anguloRodeo;
+        float sentidoRodeo = 1f;
+        float limiteRodeo;
+        float cooldownAmenaza;
+        float cooldownRodeo;
+        bool accionLanzada;
 
-        void Start()
+        public RaptorState Estado => currentState;
+
+        void Reset()
         {
-            originPos = transform.position;
-            animator = GetComponentInChildren<Animator>();
-            player = FindAnyObjectByType<DinoVehicleController>();
+            frenteInvertido = true;
+            velocidadClipCaminar = 1.6f;
+            velocidadClipCorrer = 7.5f;
+            aceleracion = 7f;
+            giroGradosSeg = 140f;
+        }
 
-#if UNITY_EDITOR
-            // El prefab del raptor no trae AnimatorController; sin uno queda en pose fija.
-            if (animator != null && animator.runtimeAnimatorController == null)
+        protected override void Start()
+        {
+            base.Start();
+            if (!centroAsignado)
             {
-                var ctrl = DinoMountManager.CargarControllerValido(
-                    DinoMountManager.CtrlVelociraptor,
-                    "Assets/PBRVelociraptor/Animators/DemoAnimatorWalk.controller");
-                if (ctrl != null) animator.runtimeAnimatorController = ctrl;
+                centroTerritorio = transform.position;
+                centroAsignado = true;
             }
-#endif
-
-            ElegirPuntoAcecho();
+            sentidoRodeo = Random.value < 0.5f ? 1f : -1f;
+            cooldownAmenaza = Random.Range(4f, 8f) + indiceManada * 1.5f;
+            EmpezarDescanso();
+            timer = Random.Range(0f, 2f);
         }
 
         void Update()
         {
-            if (player != null)
-            {
-                float dist = Vector3.Distance(transform.position, player.transform.position);
+            float dt = Time.deltaTime;
+            timer += dt;
+            cooldownAmenaza -= dt;
+            cooldownRodeo -= dt;
 
-                // Si el Carnotauro ruge o viene embalado hacia ellos
-                if (player.IsRoaring || (player.CurrentSpeedKmh > 22f && dist < alertDistance))
-                {
-                    currentState = RaptorState.Scattering;
-                }
-            }
+            EvaluarJugador();
 
             switch (currentState)
             {
-                case RaptorState.Stalking:
-                    stateTimer += Time.deltaTime;
-                    MoverHacia(targetPos, stalkSpeed);
-                    if (Vector3.Distance(transform.position, targetPos) < 1.2f || stateTimer > 8f)
+                case RaptorState.Patrullar:
+                    if (lider == null)
                     {
-                        ElegirPuntoAcecho();
-                        stateTimer = 0f;
-                    }
-                    break;
-
-                case RaptorState.Scattering:
-                    if (player != null)
-                    {
-                        Vector3 huida = (transform.position - player.transform.position).normalized;
-                        huida.y = 0;
-                        MoverHacia(transform.position + huida * 20f, sprintSpeed);
-
-                        if (Vector3.Distance(transform.position, player.transform.position) > alertDistance * 1.5f)
-                        {
-                            currentState = RaptorState.Stalking;
-                            originPos = transform.position;
-                            ElegirPuntoAcecho();
-                        }
+                        Locomover(destino, VelCaminar, 1.5f);
+                        if (Plano(destino - transform.position).magnitude < 2f || timer > 35f) DecidirParada();
                     }
                     else
                     {
-                        currentState = RaptorState.Stalking;
+                        SeguirHueco();
+                        if (!LejosDeSuHueco(2.5f) && lider.velActual < 0.2f) ImitarAlLider();
                     }
                     break;
+
+                case RaptorState.Olfatear:
+                case RaptorState.Descansar:
+                    Frenar();
+                    if (lider != null)
+                    {
+                        if (LejosDeSuHueco(5f)) Cambiar(RaptorState.Patrullar);
+                    }
+                    else if (timer >= duracion)
+                    {
+                        NuevoPuntoPatrulla();
+                    }
+                    break;
+
+                case RaptorState.Dormir:
+                    Frenar();
+                    if (timer >= duracion || (lider != null && lider.currentState != RaptorState.Dormir && timer > 2f))
+                    {
+                        IniciarAccion("WakeUp", 3f);
+                        animQuieta = "Idle";
+                        Cambiar(RaptorState.Despertar);
+                    }
+                    break;
+
+                case RaptorState.Despertar:
+                    Frenar();
+                    if (!AccionEnCurso) NuevoPuntoPatrulla();
+                    break;
+
+                case RaptorState.Rodear:
+                    Rodear(dt);
+                    break;
+
+                case RaptorState.Amenazar:
+                    if (AccionEnCurso)
+                    {
+                        Frenar();
+                    }
+                    else if (!accionLanzada && AlineacionCon(PosJugador) < 0.8f && timer < 2.5f)
+                    {
+                        Locomover(PosJugador, VelCaminar * 0.6f, 0f);
+                    }
+                    else if (!accionLanzada)
+                    {
+                        Frenar();
+                        accionLanzada = true;
+                        float r = Random.value;
+                        IniciarAccion(r < 0.45f ? "Roar" : (r < 0.75f ? "Call" : "Attack"), 3.5f);
+                    }
+                    else
+                    {
+                        Cambiar(RaptorState.Rodear);
+                    }
+                    break;
+
+                case RaptorState.Dispersarse:
+                    Locomover(transform.position + dirHuida * 30f, VelCorrer * 1.5f, 0.5f);
+                    if (timer > duracion && DistanciaJugador() > alertDistance * 1.5f)
+                    {
+                        cooldownRodeo = 10f;
+                        Cambiar(RaptorState.Reagrupar);
+                    }
+                    break;
+
+                case RaptorState.Reagrupar:
+                {
+                    Vector3 objetivo = lider != null ? HuecoEnManada() : centroTerritorio;
+                    float dist = Plano(objetivo - transform.position).magnitude;
+                    Locomover(objetivo, dist > 20f ? VelCorrer * 0.75f : VelCaminar, 2f);
+                    if (dist < 3f) EmpezarDescanso();
+                    break;
+                }
             }
 
+            PegarAlSuelo();
             ActualizarAnimacion();
         }
 
-        void ElegirPuntoAcecho()
+        void EvaluarJugador()
         {
-            Vector2 circ = Random.insideUnitCircle * 16f;
-            targetPos = originPos + new Vector3(circ.x, 0, circ.y);
-            targetPos.y = transform.position.y;
-        }
+            if (jugador == null || currentState == RaptorState.Dispersarse) return;
 
-        void MoverHacia(Vector3 target, float speed)
-        {
-            Vector3 dir = target - transform.position;
-            dir.y = 0;
-            if (dir.sqrMagnitude > 0.05f)
+            float dist = DistanciaJugador();
+            bool panico = (jugador.IsRoaring && dist < 35f)
+                       || (jugador.CurrentSpeedKmh > 22f && dist < alertDistance)
+                       || dist < distanciaPanico
+                       || (lider != null && lider.currentState == RaptorState.Dispersarse);
+
+            if (panico)
             {
-                float signo = frenteInvertido ? -1f : 1f;
-                Quaternion rot = Quaternion.LookRotation(dir * signo);
-                transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * 6f);
-                transform.position += transform.forward * (signo * speed * Time.deltaTime);
+                Dispersar();
+                return;
+            }
+
+            bool tranquilo = currentState == RaptorState.Patrullar || currentState == RaptorState.Olfatear
+                          || currentState == RaptorState.Descansar || currentState == RaptorState.Reagrupar;
+
+            if (currentState == RaptorState.Dormir && dist < distanciaDeteccion * 0.6f)
+            {
+                IniciarAccion("WakeUp", 3f);
+                animQuieta = "Idle";
+                Cambiar(RaptorState.Despertar);
+                return;
+            }
+
+            bool liderRodea = lider != null && (lider.currentState == RaptorState.Rodear || lider.currentState == RaptorState.Amenazar);
+            if (tranquilo && cooldownRodeo <= 0f && (dist < distanciaDeteccion || liderRodea))
+            {
+                EmpezarRodeo();
             }
         }
 
-        string estadoAnim;
-
-        void ActualizarAnimacion()
+        void Rodear(float dt)
         {
-            // Sin controller, HasState/CrossFade registran un aviso en cada frame.
-            if (animator == null || !animator.isActiveAndEnabled || animator.runtimeAnimatorController == null) return;
+            if (jugador == null) { EmpezarDescanso(); return; }
 
-            string deseado = null;
-            if (currentState == RaptorState.Scattering)
+            float vRodeo = Mathf.Lerp(VelCaminar, VelCorrer, 0.25f);
+            anguloRodeo += sentidoRodeo * (vRodeo / Mathf.Max(4f, radioRodeo)) * dt;
+            Vector3 p = PosJugador;
+            Vector3 objetivo = p + new Vector3(Mathf.Sin(anguloRodeo), 0f, Mathf.Cos(anguloRodeo)) * radioRodeo;
+
+            float dist = Plano(objetivo - transform.position).magnitude;
+            float vel = dist > 8f ? VelCorrer * 0.9f : vRodeo;
+            Locomover(objetivo, vel, 0.5f);
+
+            float distJugador = DistanciaJugador();
+            if (cooldownAmenaza <= 0f && distJugador < radioRodeo * 1.4f)
             {
-                if (TieneEstado("Run")) deseado = "Run";
-                else if (TieneEstado("RaptorArmature|Raptor_Run1_Anim")) deseado = "RaptorArmature|Raptor_Run1_Anim";
-            }
-            else
-            {
-                if (TieneEstado("Walk")) deseado = "Walk";
-                else if (TieneEstado("RaptorArmature|Raptor_Walk_Anim")) deseado = "RaptorArmature|Raptor_Walk_Anim";
-                else if (TieneEstado("Idle")) deseado = "Idle";
+                cooldownAmenaza = Random.Range(6f, 11f);
+                accionLanzada = false;
+                Cambiar(RaptorState.Amenazar);
+                return;
             }
 
-            // Solo al cambiar: repetir CrossFade cada frame congela la animación.
-            if (deseado == null || deseado == estadoAnim) return;
-            estadoAnim = deseado;
-            animator.CrossFade(deseado, 0.15f);
+            if (timer > limiteRodeo || distJugador > distanciaDeteccion * 1.6f)
+            {
+                cooldownRodeo = 12f;
+                Cambiar(RaptorState.Reagrupar);
+            }
         }
 
-        bool TieneEstado(string n)
+        void EmpezarRodeo()
         {
-            return animator.HasState(0, Animator.StringToHash(n));
+            Vector3 d = Plano(transform.position - PosJugador);
+            anguloRodeo = Mathf.Atan2(d.x, d.z);
+            if (lider != null) sentidoRodeo = lider.sentidoRodeo;
+            limiteRodeo = Random.Range(18f, 28f);
+            animQuieta = "Idle";
+            CancelarAccion();
+            Cambiar(RaptorState.Rodear);
+        }
+
+        void Dispersar()
+        {
+            Vector3 lejos = Plano(transform.position - PosJugador).normalized;
+            if (lejos.sqrMagnitude < 0.01f) lejos = -Frente;
+            dirHuida = Quaternion.Euler(0f, Random.Range(-60f, 60f), 0f) * lejos;
+            duracion = Random.Range(4f, 6.5f);
+            animQuieta = "Idle";
+            CancelarAccion();
+            Cambiar(RaptorState.Dispersarse);
+        }
+
+        void DecidirParada()
+        {
+            float r = Random.value;
+            if (r < 0.4f) { animQuieta = "Sniff"; duracion = Random.Range(4f, 7f); Cambiar(RaptorState.Olfatear); }
+            else if (r < 0.62f) EmpezarDescanso();
+            else if (r < 0.75f) EmpezarSueno();
+            else NuevoPuntoPatrulla();
+        }
+
+        void ImitarAlLider()
+        {
+            switch (lider.currentState)
+            {
+                case RaptorState.Dormir:
+                    EmpezarSueno();
+                    break;
+                case RaptorState.Olfatear:
+                    animQuieta = Random.value < 0.7f ? "Sniff" : "Idle2";
+                    duracion = Random.Range(4f, 7f);
+                    Cambiar(RaptorState.Olfatear);
+                    break;
+                default:
+                    EmpezarDescanso();
+                    break;
+            }
+        }
+
+        void EmpezarDescanso()
+        {
+            animQuieta = Random.value < 0.6f ? "Idle" : "Idle2";
+            duracion = Random.Range(4f, 8f);
+            Cambiar(RaptorState.Descansar);
+        }
+
+        void EmpezarSueno()
+        {
+            IniciarAccion("GoToSleep", 3f);
+            animQuieta = "Sleep";
+            duracion = Random.Range(18f, 35f);
+            Cambiar(RaptorState.Dormir);
+        }
+
+        void NuevoPuntoPatrulla()
+        {
+            Vector2 c = Random.insideUnitCircle * radioPatrulla;
+            destino = centroTerritorio + new Vector3(c.x, 0f, c.y);
+            animQuieta = "Idle";
+            Cambiar(RaptorState.Patrullar);
+        }
+
+        void SeguirHueco()
+        {
+            Vector3 hueco = HuecoEnManada();
+            float dist = Plano(hueco - transform.position).magnitude;
+            float vel = dist > 15f ? VelCorrer * 0.7f : VelCaminar * Mathf.Lerp(0.8f, 1.2f, Mathf.InverseLerp(2f, 10f, dist));
+            Locomover(hueco, vel, 1.2f);
+        }
+
+        Vector3 HuecoEnManada()
+        {
+            if (lider == null) return transform.position;
+            return lider.transform.position + Quaternion.Euler(0f, lider.yaw, 0f) * offsetManada;
+        }
+
+        bool LejosDeSuHueco(float margen) => Plano(HuecoEnManada() - transform.position).magnitude > margen;
+
+        void Cambiar(RaptorState s)
+        {
+            currentState = s;
+            timer = 0f;
+        }
+
+        static Vector3 Plano(Vector3 v)
+        {
+            v.y = 0f;
+            return v;
         }
     }
 }

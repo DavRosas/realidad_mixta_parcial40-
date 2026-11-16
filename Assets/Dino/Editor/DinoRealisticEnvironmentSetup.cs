@@ -91,6 +91,9 @@ namespace DinoVehicle.Editor
         [MenuItem("DINO WEST/Construir Terreno y Ecosistema Realista (Cero Poligonos)")]
         public static void EjecutarReemplazoCompleto()
         {
+            // Animators reales (Idle, Walk, Run, Roar, Eat, Drink, Attack, Sniff, Sleep...) antes de crear la fauna.
+            DinoControllerBuilder.BuildControllers(false);
+
             string escenaActivaAlIniciar = EditorSceneManager.GetActiveScene().path;
 
             foreach (var rutaEscena in EscenasObjetivo)
@@ -122,7 +125,7 @@ namespace DinoVehicle.Editor
                 var rocasRoot = new GameObject("03_Rocas_PBR_Fotorrealistas");
                 rocasRoot.transform.SetParent(ecoRoot.transform, false);
 
-                var floraRoot = new GameObject("04_Flora_Helechos_Y_Cactus");
+                var floraRoot = new GameObject("04_Flora_Flores_Y_Arbustos");
                 floraRoot.transform.SetParent(ecoRoot.transform, false);
 
                 var faunaRoot = new GameObject("05_Fauna_Dinosaurios_Vivos");
@@ -131,12 +134,13 @@ namespace DinoVehicle.Editor
                 var juguetesRoot = new GameObject("06_Pista_Obstaculos_Y_Pelota");
                 juguetesRoot.transform.SetParent(ecoRoot.transform, false);
 
-                // 5. Poblar con los assets descargados
-                PoblarArboleda(arboledaRoot.transform, comidaRoot.transform);
-                PoblarRocas(rocasRoot.transform);
-                PoblarFlora(floraRoot.transform);
-                PoblarFauna(faunaRoot.transform);
+                // 5. Poblar con los assets descargados (misma distribución que el generador en Play)
+                var terreno = TerrenoDeEscena(terrainGo);
+                int arboles = DinoEcosystemLayout.PoblarArboles(arboledaRoot.transform, comidaRoot.transform, terreno, Cargar, InstanciarPrefab);
+                int detalles = DinoEcosystemLayout.PoblarRocasYFlora(rocasRoot.transform, floraRoot.transform, terreno, Cargar, InstanciarPrefab);
+                int dinos = DinoEcosystemLayout.PoblarFauna(faunaRoot.transform, terreno, Cargar, InstanciarPrefab, ControllerDe, null);
                 PoblarObstaculosYPelota(juguetesRoot.transform);
+                Debug.Log($"<color=cyan>[DinoRealisticEnvironmentSetup]</color> {arboles} árboles, {detalles} rocas/flores y {dinos} dinosaurios en {rutaEscena}");
 
                 // 6. Asegurar posición del jugador y componentes de impacto
                 AsegurarJugador();
@@ -209,15 +213,15 @@ namespace DinoVehicle.Editor
         // -------------------------------------------------------------
         // 2. CREACIÓN DEL TERRENO REALISTA PBR CON UNITY TERRAIN
         // -------------------------------------------------------------
-        /// <summary>Lado del terreno en metros. La pista ocupa x ±45 y z de -120 a 220.</summary>
-        const float TamTerreno = 700f;
+        /// <summary>Lado del terreno en metros (360 m). Pista plana x ±28, z de -60 a 165, más 5 praderas planas.</summary>
+        const float TamTerreno = DinoEcosystemLayout.TamTerreno;
         const string RutaDatosTerreno = "Assets/Dino/Terrains/DinoWest_TerrainData.asset";
+        const string CarpetaCapas = "Assets/Dino/Terrains/Layers";
 
         static GameObject CrearTerrenoRealista()
         {
             TerrainData tData = PrepararDatosTerreno();
 
-            // Instanciar GameObject del Terreno
             var terrainGo = Terrain.CreateTerrainGameObject(tData);
             terrainGo.name = "Terreno_Realista_PBR";
             terrainGo.transform.position = new Vector3(-TamTerreno * 0.5f, 0f, -TamTerreno * 0.5f);
@@ -229,150 +233,140 @@ namespace DinoVehicle.Editor
             terrainComp.treeDistance = 1500f;
             terrainComp.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.On;
             terrainComp.heightmapPixelError = 3;
+            terrainComp.basemapDistance = 400f;
 
             return terrainGo;
+        }
+
+        /// <summary>
+        /// Copia de una capa del paquete URP apta para Built-in: sin MaskMap (el shader estándar la ignora
+        /// y el albedo con alfa la volvía brillante como agua), sin metal y sin brillo.
+        /// </summary>
+        static TerrainLayer CapaBIRP(string nombre, float normalScale = 0.8f)
+        {
+            string ruta = $"{CarpetaCapas}/BIRP_{nombre}.terrainlayer";
+            var origen = AssetDatabase.LoadAssetAtPath<TerrainLayer>($"Assets/TerrainDemoScene_URP/Terrain/Layers/{nombre}.terrainlayer");
+            if (origen == null) return null;
+
+            if (!AssetDatabase.IsValidFolder(CarpetaCapas)) AssetDatabase.CreateFolder("Assets/Dino/Terrains", "Layers");
+            var capa = AssetDatabase.LoadAssetAtPath<TerrainLayer>(ruta);
+            bool nueva = capa == null;
+            if (nueva) capa = new TerrainLayer();
+
+            capa.diffuseTexture = origen.diffuseTexture;
+            capa.normalMapTexture = origen.normalMapTexture;
+            capa.maskMapTexture = null;
+            capa.tileSize = origen.tileSize;
+            capa.tileOffset = origen.tileOffset;
+            capa.normalScale = normalScale;
+            capa.metallic = 0f;
+            capa.smoothness = 0f;
+            capa.specular = Color.black;
+            capa.diffuseRemapMin = Vector4.zero;
+            capa.diffuseRemapMax = Vector4.one;
+
+            if (nueva) AssetDatabase.CreateAsset(capa, ruta);
+
+            // Suavidad constante (0): con "alfa del difuso" el pasto con canal alfa brillaba como agua mojada.
+            var so = new SerializedObject(capa);
+            var fuente = so.FindProperty("m_SmoothnessSource");
+            if (fuente != null)
+            {
+                fuente.intValue = 0;
+                so.ApplyModifiedPropertiesWithoutUndo();
+            }
+            EditorUtility.SetDirty(capa);
+            return capa;
         }
 
         static TerrainData PrepararDatosTerreno()
         {
             string dirPath = "Assets/Dino/Terrains";
-            if (!Directory.Exists(dirPath))
-            {
-                Directory.CreateDirectory(dirPath);
-                AssetDatabase.Refresh();
-            }
+            if (!AssetDatabase.IsValidFolder(dirPath)) AssetDatabase.CreateFolder("Assets/Dino", "Terrains");
 
-            string dataPath = RutaDatosTerreno;
-            TerrainData tData = AssetDatabase.LoadAssetAtPath<TerrainData>(dataPath);
-
+            TerrainData tData = AssetDatabase.LoadAssetAtPath<TerrainData>(RutaDatosTerreno);
             if (tData == null)
             {
                 tData = new TerrainData();
                 tData.heightmapResolution = 513;
-                tData.size = new Vector3(TamTerreno, 65f, TamTerreno);
-                AssetDatabase.CreateAsset(tData, dataPath);
+                tData.size = new Vector3(TamTerreno, DinoEcosystemLayout.AlturaTerreno, TamTerreno);
+                AssetDatabase.CreateAsset(tData, RutaDatosTerreno);
             }
             else
             {
                 tData.heightmapResolution = 513;
-                tData.size = new Vector3(TamTerreno, 65f, TamTerreno);
+                tData.size = new Vector3(TamTerreno, DinoEcosystemLayout.AlturaTerreno, TamTerreno);
             }
 
-            // Asignar las capas PBR descargadas
-            var layerGrass = AssetDatabase.LoadAssetAtPath<TerrainLayer>("Assets/TerrainDemoScene_URP/Terrain/Layers/Grass_A.terrainlayer");
-            var layerSoil = AssetDatabase.LoadAssetAtPath<TerrainLayer>("Assets/TerrainDemoScene_URP/Terrain/Layers/Grass_Soil_A.terrainlayer");
-            var layerPebbles = AssetDatabase.LoadAssetAtPath<TerrainLayer>("Assets/TerrainDemoScene_URP/Terrain/Layers/Pebbles_B.terrainlayer");
-            var layerCliff = AssetDatabase.LoadAssetAtPath<TerrainLayer>("Assets/TerrainDemoScene_URP/Terrain/Layers/Cliff_Mossy_E.terrainlayer");
-
-            List<TerrainLayer> capas = new();
-            if (layerGrass != null) capas.Add(layerGrass);
-            if (layerSoil != null) capas.Add(layerSoil);
-            if (layerPebbles != null) capas.Add(layerPebbles);
-            if (layerCliff != null) capas.Add(layerCliff);
-
-            if (capas.Count > 0)
+            // 0 pradera, 1 tierra de la pista, 2 gravilla, 3 roca, 4 pasto de colina
+            var capas = new List<TerrainLayer>();
+            foreach (var c in new[] { CapaBIRP("Grass_A"), CapaBIRP("Grass_Soil_A"), CapaBIRP("Pebbles_B"), CapaBIRP("Cliff_Mossy_E", 1f), CapaBIRP("Grass_B") })
             {
-                tData.terrainLayers = capas.ToArray();
+                if (c != null) capas.Add(c);
             }
+            if (capas.Count > 0) tData.terrainLayers = capas.ToArray();
+            int numCapas = capas.Count;
 
-            // Generar alturas suaves: zona central plana para correr, colinas onduladas a los lados
+            // Alturas: pista y praderas planas, transición smoothstep a colinas suaves.
             int res = tData.heightmapResolution;
             float[,] heights = new float[res, res];
-
             for (int z = 0; z < res; z++)
             {
-                float normZ = (float)z / (res - 1);
-                float worldZ = (normZ - 0.5f) * TamTerreno;
-
+                float worldZ = ((float)z / (res - 1) - 0.5f) * TamTerreno;
                 for (int x = 0; x < res; x++)
                 {
-                    float normX = (float)x / (res - 1);
-                    float worldX = (normX - 0.5f) * TamTerreno;
-
-                    // Corredor central de la pista (x entre -60 y +60, z entre -120 y +220)
-                    float distTrackX = Mathf.Abs(worldX);
-                    float distTrackZ = Mathf.Max(worldZ - 220f, -120f - worldZ, 0f);
-
-                    float distTrack = Mathf.Max(distTrackX - 45f, distTrackZ);
-
-                    if (distTrack <= 0f)
-                    {
-                        // Suelo plano natural perfecto para correr con el dinosaurio
-                        heights[z, x] = 0f;
-                    }
-                    else
-                    {
-                        // Transición suave hacia colinas naturales ondulantes
-                        float factor = Mathf.Clamp01(distTrack / 160f);
-                        float smoothFactor = factor * factor * (3f - 2f * factor);
-
-                        // Ruido suave armónico (cero facetas poligonales)
-                        float colina1 = Mathf.Sin(worldX * 0.016f) * Mathf.Cos(worldZ * 0.013f) * 0.5f + 0.5f;
-                        float colina2 = Mathf.Sin(worldX * 0.008f + worldZ * 0.007f) * 0.5f + 0.5f;
-                        float colina3 = Mathf.Cos(worldX * 0.004f - worldZ * 0.005f) * 0.5f + 0.5f;
-
-                        float blendHills = (colina1 * 0.45f + colina2 * 0.35f + colina3 * 0.20f);
-
-                        // Altura máxima moderada (~22m en el borde)
-                        heights[z, x] = blendHills * smoothFactor * 0.34f;
-                    }
+                    float worldX = ((float)x / (res - 1) - 0.5f) * TamTerreno;
+                    heights[z, x] = DinoEcosystemLayout.AlturaNormalizada(worldX, worldZ);
                 }
             }
-
             tData.SetHeights(0, 0, heights);
 
-            // Generar texturizado orgánico (Alphamaps / Splatmaps)
+            // Texturizado: tierra en la pista, gravilla en sus bordes, pasto en praderas,
+            // mezcla de pastos en colinas y roca solo donde la pendiente es fuerte.
             int alphaRes = tData.alphamapResolution;
-            int numCapas = capas.Count;
-            float[,,] alphamaps = new float[alphaRes, alphaRes, numCapas];
+            float[,,] alphamaps = new float[alphaRes, alphaRes, Mathf.Max(1, numCapas)];
+            var w = new float[5];
 
             for (int z = 0; z < alphaRes; z++)
             {
-                float normZ = (float)z / (alphaRes - 1);
-                float worldZ = (normZ - 0.5f) * TamTerreno;
-
+                float nz = (float)z / (alphaRes - 1);
+                float worldZ = (nz - 0.5f) * TamTerreno;
                 for (int x = 0; x < alphaRes; x++)
                 {
-                    float normX = (float)x / (alphaRes - 1);
-                    float worldX = (normX - 0.5f) * TamTerreno;
+                    float nx = (float)x / (alphaRes - 1);
+                    float worldX = (nx - 0.5f) * TamTerreno;
 
+                    System.Array.Clear(w, 0, w.Length);
+                    float plan = DinoEcosystemLayout.Planitud(worldX, worldZ);
+                    float pendiente = tData.GetSteepness(nx, nz);
+                    float ruido = Mathf.PerlinNoise(worldX * 0.02f + 11f, worldZ * 0.02f + 7f);
+
+                    bool enPista = worldZ >= DinoEcosystemLayout.PistaZMin + 20f && worldZ <= DinoEcosystemLayout.PistaZMax - 20f;
                     float distEje = Mathf.Abs(worldX);
 
-                    // Camino central de tierra (Grass_Soil_A) donde corre el dinosaurio
-                    if (distEje < 10f && worldZ >= -100f && worldZ <= 200f)
-                    {
-                        float blendDirt = Mathf.Clamp01(1f - (distEje / 10f));
-                        alphamaps[z, x, 0] = 1f - blendDirt * 0.85f; // Pasto
-                        if (numCapas > 1) alphamaps[z, x, 1] = blendDirt * 0.85f; // Tierra
-                    }
-                    else if (distEje < 16f && worldZ >= -100f && worldZ <= 200f && numCapas > 2)
-                    {
-                        // Borde de gravilla (Pebbles_B)
-                        float blendPebbles = Mathf.Clamp01(1f - Mathf.Abs(distEje - 13f) / 3f);
-                        alphamaps[z, x, 0] = 1f - blendPebbles * 0.6f;
-                        alphamaps[z, x, 2] = blendPebbles * 0.6f;
-                    }
-                    else
-                    {
-                        // Colinas: Pasto verde y riscos en zonas altas
-                        float distFuera = Mathf.Max(distEje - 50f, 0f);
-                        float steepness = Mathf.Clamp01(distFuera / 200f);
+                    float tierra = enPista ? 1f - Mathf.Clamp01((distEje - 6f) / 4f) : 0f;
+                    float gravilla = enPista ? Mathf.Clamp01(1f - Mathf.Abs(distEje - 11f) / 3f) * 0.7f : 0f;
+                    float roca = Mathf.Clamp01((pendiente - 20f) / 16f);
 
-                        if (steepness > 0.45f && numCapas > 3)
-                        {
-                            float cliffWeight = (steepness - 0.45f) / 0.55f;
-                            alphamaps[z, x, 0] = 1f - cliffWeight;
-                            alphamaps[z, x, 3] = cliffWeight; // Riscos de roca
-                        }
-                        else
-                        {
-                            alphamaps[z, x, 0] = 1.0f; // Pasto verde dominante
-                        }
-                    }
+                    w[1] = tierra * 0.9f;
+                    w[2] = gravilla;
+                    w[3] = roca;
+                    float resto = Mathf.Max(0f, 1f - w[1] - w[2] - w[3]);
+                    // En lo plano domina el pasto de pradera; en colinas se mezcla con el segundo pasto.
+                    float colina = Mathf.Clamp01((1f - plan) * 0.8f + (ruido - 0.5f) * 0.6f);
+                    w[0] = resto * (1f - colina);
+                    w[4] = resto * colina;
+
+                    if (numCapas < 5) { w[0] += w[4]; w[4] = 0f; }
+                    float suma = 0f;
+                    for (int i = 0; i < numCapas; i++) suma += w[i];
+                    if (suma <= 0f) { w[0] = 1f; suma = 1f; }
+                    for (int i = 0; i < numCapas; i++) alphamaps[z, x, i] = w[i] / suma;
                 }
             }
 
-            tData.SetAlphamaps(0, 0, alphamaps);
+            if (numCapas > 0) tData.SetAlphamaps(0, 0, alphamaps);
+            EditorUtility.SetDirty(tData);
             AssetDatabase.SaveAssets();
             return tData;
         }
@@ -397,331 +391,43 @@ namespace DinoVehicle.Editor
                 skyGo.name = "SkyboxMountains_DinoWest";
                 skyGo.transform.position = new Vector3(0f, -25f, 0f);
                 skyGo.transform.localScale = Vector3.one * 1.15f;
+                DinoMaterialesBIRP.Aplicar(skyGo);
             }
 
             // Niebla atmosférica suave que se funde con el horizonte (sin vacío negro)
             RenderSettings.fog = true;
             RenderSettings.fogMode = FogMode.ExponentialSquared;
-            RenderSettings.fogDensity = 0.0016f;
+            RenderSettings.fogDensity = 0.0032f;
             RenderSettings.fogColor = new Color(0.72f, 0.79f, 0.86f);
         }
 
         // -------------------------------------------------------------
-        // 4. ARBOLEDA PBR REALISTA Y CONÍFERAS
+        // 4-7. BOSQUES, ROCAS, FLORA Y FAUNA (DinoEcosystemLayout)
         // -------------------------------------------------------------
-        static void PoblarArboleda(Transform arboledaParent, Transform comidaParent)
+        static GameObject Cargar(string ruta) => AssetDatabase.LoadAssetAtPath<GameObject>(ruta);
+
+        static GameObject InstanciarPrefab(GameObject prefab, Transform padre)
         {
-            string[] broadleafTrees = {
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_1.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_5.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_10.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_14.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_19.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_22.prefab",
-                "Assets/Trees Collection Asset PBR/Prefabs/Tree_25.prefab"
-            };
-
-            string[] coniferTrees = {
-                "Assets/Forst/Conifers [BOTD]/Render Pipeline Support/BIRP/Prefabs/PF Conifer Tall BOTD.prefab",
-                "Assets/Forst/Conifers [BOTD]/Render Pipeline Support/BIRP/Prefabs/PF Conifer Medium BOTD.prefab",
-                "Assets/TerrainDemoScene_URP/Prefabs/Trees/Pines/Pine_A/Pine_A.prefab"
-            };
-
-            List<GameObject> pbrPrefabs = new();
-            foreach (var p in broadleafTrees)
-            {
-                var go = AssetDatabase.LoadAssetAtPath<GameObject>(p);
-                if (go != null) pbrPrefabs.Add(go);
-            }
-
-            List<GameObject> coniferPrefabs = new();
-            foreach (var p in coniferTrees)
-            {
-                var go = AssetDatabase.LoadAssetAtPath<GameObject>(p);
-                if (go != null) coniferPrefabs.Add(go);
-            }
-
-            // Arboleda Oeste (Caducifolios PBR)
-            Vector3[] posOeste = {
-                new Vector3(-24f, 0f, 15f), new Vector3(-32f, 0f, 30f), new Vector3(-38f, 0f, 50f),
-                new Vector3(-28f, 0f, 70f), new Vector3(-42f, 0f, 90f), new Vector3(-35f, 0f, 115f),
-                new Vector3(-26f, 0f, 135f), new Vector3(-45f, 0f, 155f), new Vector3(-30f, 0f, 175f),
-                new Vector3(-20f, 0f, -25f), new Vector3(-34f, 0f, -48f), new Vector3(-22f, 0f, -70f)
-            };
-
-            for (int i = 0; i < posOeste.Length; i++)
-            {
-                if (pbrPrefabs.Count == 0) break;
-                var prefab = pbrPrefabs[i % pbrPrefabs.Count];
-                var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab, arboledaParent);
-                inst.name = $"PBR_Tree_Oeste_{i + 1}";
-                inst.transform.position = posOeste[i];
-                inst.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                inst.transform.localScale = Vector3.one * Random.Range(0.9f, 1.25f);
-                AsegurarColliderTronco(inst);
-            }
-
-            // Arboleda Este (Pinares y Coníferas BOTD)
-            Vector3[] posEste = {
-                new Vector3(25f, 0f, 18f), new Vector3(34f, 0f, 38f), new Vector3(42f, 0f, 58f),
-                new Vector3(28f, 0f, 80f), new Vector3(36f, 0f, 105f), new Vector3(45f, 0f, 128f),
-                new Vector3(30f, 0f, 148f), new Vector3(40f, 0f, 170f), new Vector3(26f, 0f, 190f),
-                new Vector3(24f, 0f, -30f), new Vector3(36f, 0f, -55f), new Vector3(22f, 0f, -80f)
-            };
-
-            for (int j = 0; j < posEste.Length; j++)
-            {
-                var pool = (coniferPrefabs.Count > 0) ? coniferPrefabs : pbrPrefabs;
-                var prefab = pool[j % pool.Count];
-                var inst = (GameObject)PrefabUtility.InstantiatePrefab(prefab, arboledaParent);
-                inst.name = $"PBR_Conifera_Este_{j + 1}";
-                inst.transform.position = posEste[j];
-                inst.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                inst.transform.localScale = Vector3.one * Random.Range(0.85f, 1.3f);
-                AsegurarColliderTronco(inst);
-            }
-
-            // 4 Árboles de comida interactivos para restaurar estamina
-            Vector3[] posComida = {
-                new Vector3(-18f, 0f, 45f),
-                new Vector3(-24f, 0f, 60f),
-                new Vector3(20f, 0f, 50f),
-                new Vector3(26f, 0f, 65f)
-            };
-
-            for (int k = 0; k < posComida.Length; k++)
-            {
-                var prefab = pbrPrefabs.Count > 0 ? pbrPrefabs[k % pbrPrefabs.Count] : null;
-                if (prefab == null) continue;
-
-                var foodTree = (GameObject)PrefabUtility.InstantiatePrefab(prefab, comidaParent);
-                foodTree.name = $"Arbol_Comida_Oasis_{k + 1}";
-                foodTree.transform.position = posComida[k];
-                foodTree.transform.localScale = Vector3.one * 1.15f;
-                foodTree.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-
-                AsegurarColliderTronco(foodTree);
-
-                if (foodTree.GetComponent<DinoFoodTree>() == null)
-                {
-                    foodTree.AddComponent<DinoFoodTree>();
-                }
-            }
+            var go = PrefabUtility.InstantiatePrefab(prefab, padre) as GameObject;
+            return go != null ? go : Object.Instantiate(prefab, padre);
         }
 
-        static void AsegurarColliderTronco(GameObject tree)
+        static Terrain TerrenoDeEscena(GameObject terrainGo)
         {
-            var col = tree.GetComponentInChildren<Collider>();
-            if (col == null)
-            {
-                var cc = tree.AddComponent<CapsuleCollider>();
-                cc.radius = 0.55f;
-                cc.height = 9.0f;
-                cc.center = new Vector3(0, 4.5f, 0);
-            }
+            var t = terrainGo != null ? terrainGo.GetComponent<Terrain>() : null;
+            return t != null ? t : Terrain.activeTerrain;
         }
 
-        // -------------------------------------------------------------
-        // 5. ROCAS PBR FOTORREALISTAS
-        // -------------------------------------------------------------
-        static void PoblarRocas(Transform rocasParent)
+        static RuntimeAnimatorController ControllerDe(DinoEcosystemLayout.Especie e)
         {
-            string[] rockPaths = {
-                "Assets/TerrainDemoScene_URP/Prefabs/Rocks/Rock_A_01.prefab",
-                "Assets/TerrainDemoScene_URP/Prefabs/Rocks/Rock_B_01.prefab",
-                "Assets/TerrainDemoScene_URP/Prefabs/Rocks/Rock_Overgrown_A.prefab"
+            string ruta = e switch
+            {
+                DinoEcosystemLayout.Especie.Estegosaurio => DinoControllerBuilder.CtrlEstegosaurio,
+                DinoEcosystemLayout.Especie.Paquicefalo => DinoControllerBuilder.CtrlPaquicefalo,
+                DinoEcosystemLayout.Especie.Raptor => DinoControllerBuilder.CtrlRaptor,
+                _ => null,
             };
-
-            List<GameObject> rockPrefabs = new();
-            foreach (var p in rockPaths)
-            {
-                var go = AssetDatabase.LoadAssetAtPath<GameObject>(p);
-                if (go != null) rockPrefabs.Add(go);
-            }
-
-            if (rockPrefabs.Count == 0) return;
-
-            Vector3[] posRocas = {
-                new Vector3(-21f, 0f, 25f),
-                new Vector3(-35f, 0f, 62f),
-                new Vector3(22f, 0f, 28f),
-                new Vector3(38f, 0f, 72f),
-                new Vector3(-18f, 0f, 105f),
-                new Vector3(25f, 0f, 122f),
-                new Vector3(-15f, 0f, -40f),
-                new Vector3(18f, 0f, -45f)
-            };
-
-            for (int i = 0; i < posRocas.Length; i++)
-            {
-                var prefab = rockPrefabs[i % rockPrefabs.Count];
-                var roca = (GameObject)PrefabUtility.InstantiatePrefab(prefab, rocasParent);
-                roca.name = $"Roca_PBR_{i + 1}";
-                roca.transform.position = posRocas[i];
-                roca.transform.rotation = Quaternion.Euler(Random.Range(-5f, 5f), Random.Range(0f, 360f), Random.Range(-5f, 5f));
-                roca.transform.localScale = Vector3.one * Random.Range(1.0f, 1.8f);
-
-                if (roca.GetComponentInChildren<Collider>() == null)
-                {
-                    roca.AddComponent<MeshCollider>();
-                }
-            }
-        }
-
-        // -------------------------------------------------------------
-        // 6. FLORA: HELECHOS, ARBUSTOS Y FLORES DE CACTUS
-        // -------------------------------------------------------------
-        static void PoblarFlora(Transform floraParent)
-        {
-            // 1. Flores de Cactus
-            string cactusPath = "Assets/Dino/Models/Flora/CactusFlowers_2.fbx";
-            var cactusPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(cactusPath);
-
-            if (cactusPrefab != null)
-            {
-                Vector3[] posCactus = {
-                    new Vector3(-14f, 0f, 35f), new Vector3(-16f, 0f, 55f),
-                    new Vector3(15f, 0f, 42f), new Vector3(17f, 0f, 68f),
-                    new Vector3(-10f, 0f, 92f), new Vector3(11f, 0f, 110f),
-                    new Vector3(-14f, 0f, 145f), new Vector3(14f, 0f, 160f)
-                };
-
-                for (int i = 0; i < posCactus.Length; i++)
-                {
-                    var flor = (GameObject)PrefabUtility.InstantiatePrefab(cactusPrefab, floraParent);
-                    flor.name = $"Flor_Cactus_{i + 1}";
-                    flor.transform.position = posCactus[i];
-                    flor.transform.localScale = Vector3.one * Random.Range(1.3f, 2.2f);
-                    flor.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                }
-            }
-
-            // 2. Helechos y Arbustos PBR
-            string[] foliagePaths = {
-                "Assets/TerrainDemoScene_URP/Prefabs/Details/Fern_A.prefab",
-                "Assets/TerrainDemoScene_URP/Prefabs/Details/Bush_A.prefab",
-                "Assets/TerrainDemoScene_URP/Prefabs/Details/Heather_A.prefab"
-            };
-
-            List<GameObject> folPrefabs = new();
-            foreach (var p in foliagePaths)
-            {
-                var go = AssetDatabase.LoadAssetAtPath<GameObject>(p);
-                if (go != null) folPrefabs.Add(go);
-            }
-
-            if (folPrefabs.Count > 0)
-            {
-                Vector3[] posFoliage = {
-                    new Vector3(-20f, 0f, 18f), new Vector3(-27f, 0f, 35f),
-                    new Vector3(21f, 0f, 22f), new Vector3(29f, 0f, 45f),
-                    new Vector3(-23f, 0f, 85f), new Vector3(24f, 0f, 95f)
-                };
-
-                for (int j = 0; j < posFoliage.Length; j++)
-                {
-                    var prefab = folPrefabs[j % folPrefabs.Count];
-                    var fol = (GameObject)PrefabUtility.InstantiatePrefab(prefab, floraParent);
-                    fol.name = $"Foliage_PBR_{j + 1}";
-                    fol.transform.position = posFoliage[j];
-                    fol.transform.localScale = Vector3.one * Random.Range(1.1f, 1.7f);
-                    fol.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                }
-            }
-        }
-
-        // -------------------------------------------------------------
-        // 7. FAUNA VIVA: ESTEGOSAURIOS, PAQUICEFALOSAURIOS, RAPTORES
-        // -------------------------------------------------------------
-        static void PoblarFauna(Transform faunaParent)
-        {
-            // 1. Estegosaurios (Oeste)
-            string stegoGreen = "Assets/FerociousIndustries/PBRDinosaurs/PBRStegasaurus/Prefabs/LODG/Stegasaurus_Green.prefab";
-            string stegoBlue = "Assets/FerociousIndustries/PBRDinosaurs/PBRStegasaurus/Prefabs/LODG/Stegasaurus_Blue.prefab";
-            CrearHerbivoro(stegoGreen, faunaParent, new Vector3(-35f, 0f, 40f), 25f, 1.15f, "Estegosaurio_Alfa");
-            CrearHerbivoro(stegoBlue, faunaParent, new Vector3(-42f, 0f, 52f), 55f, 1.0f, "Estegosaurio_Cria");
-
-            // 2. Paquicefalosaurios (Este)
-            string pachyGreen = "Assets/FerociousIndustries/PBRDinosaurs/PBRPachycephalasaurus/Prefabs/PBR/Pachycephalasaurus_Green.prefab";
-            string pachySand = "Assets/FerociousIndustries/PBRDinosaurs/PBRPachycephalasaurus/Prefabs/PBR/Pachycephalasaurus_SandFemale.prefab";
-            CrearHerbivoro(pachyGreen, faunaParent, new Vector3(36f, 0f, 72f), -45f, 1.1f, "Paquicefalosaurio_Macho");
-            CrearHerbivoro(pachySand, faunaParent, new Vector3(44f, 0f, 82f), -75f, 1.0f, "Paquicefalosaurio_Hembra");
-
-            // 3. Velociraptores acechando en el bosque norte
-            string raptorPath = "Assets/PBRVelociraptor/Prefabs/PBR/15K/PBR_Velociraptor_Sand_Female.prefab";
-            CrearRaptor(raptorPath, faunaParent, new Vector3(30f, 0f, -32f), 135f, 1.0f, "Velociraptor_Lider");
-            CrearRaptor(raptorPath, faunaParent, new Vector3(26f, 0f, -40f), 150f, 0.95f, "Velociraptor_Acechador_1");
-            CrearRaptor(raptorPath, faunaParent, new Vector3(34f, 0f, -38f), 120f, 0.92f, "Velociraptor_Acechador_2");
-
-            // 4. Anquilosaurio
-            string ankyloPath = "Assets/Dino/Models/Fauna/Ankylosaurus/source/Dinosaur.glb";
-            var ankyloPrefab = AssetDatabase.LoadAssetAtPath<GameObject>(ankyloPath);
-            if (ankyloPrefab != null)
-            {
-                var ankylo = (GameObject)PrefabUtility.InstantiatePrefab(ankyloPrefab, faunaParent);
-                ankylo.name = "Anquilosaurio_Acorazado";
-                ankylo.transform.position = new Vector3(-26f, 0f, -42f);
-                ankylo.transform.rotation = Quaternion.Euler(0f, 40f, 0f);
-                ankylo.transform.localScale = Vector3.one * 1.6f;
-
-                if (ankylo.GetComponent<DinoAIHerbivore>() == null)
-                    ankylo.AddComponent<DinoAIHerbivore>();
-
-                if (ankylo.GetComponentInChildren<Collider>() == null)
-                {
-                    var bc = ankylo.AddComponent<BoxCollider>();
-                    bc.size = new Vector3(2.5f, 1.8f, 4.5f);
-                    bc.center = new Vector3(0, 0.9f, 0);
-                }
-            }
-        }
-
-        static void CrearHerbivoro(string path, Transform parent, Vector3 pos, float rotY, float escala, string nombre)
-        {
-            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-            if (prefab == null) return;
-
-            var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
-            go.name = nombre;
-            go.transform.position = pos;
-            go.transform.rotation = Quaternion.Euler(0f, rotY, 0f);
-            go.transform.localScale = Vector3.one * escala;
-
-            if (go.GetComponent<DinoAIHerbivore>() == null)
-                go.AddComponent<DinoAIHerbivore>();
-
-            if (go.GetComponentInChildren<Collider>() == null)
-            {
-                var cc = go.AddComponent<CapsuleCollider>();
-                cc.radius = 1.0f;
-                cc.height = 3.5f;
-                cc.direction = 2; // Eje Z
-                cc.center = new Vector3(0, 1.2f, 0);
-            }
-        }
-
-        static void CrearRaptor(string path, Transform parent, Vector3 pos, float rotY, float escala, string nombre)
-        {
-            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(path);
-            if (prefab == null) return;
-
-            var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
-            go.name = nombre;
-            go.transform.position = pos;
-            go.transform.rotation = Quaternion.Euler(0f, rotY, 0f);
-            go.transform.localScale = Vector3.one * escala;
-
-            if (go.GetComponent<DinoAIRaptor>() == null)
-                go.AddComponent<DinoAIRaptor>();
-
-            if (go.GetComponentInChildren<Collider>() == null)
-            {
-                var cc = go.AddComponent<CapsuleCollider>();
-                cc.radius = 0.5f;
-                cc.height = 2.2f;
-                cc.direction = 2;
-                cc.center = new Vector3(0, 0.9f, 0);
-            }
+            return ruta != null ? DinoMountManager.CargarControllerValido(ruta) : null;
         }
 
         // -------------------------------------------------------------
@@ -736,7 +442,7 @@ namespace DinoVehicle.Editor
             var pelota = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             pelota.name = "Pelota_Dinosaurio_Prehistorica";
             pelota.transform.SetParent(juguetesParent, false);
-            pelota.transform.position = new Vector3(12f, 1.6f, 25f);
+            pelota.transform.position = new Vector3(12f, 1.7f, 25f);
             pelota.transform.localScale = Vector3.one * 3.2f;
 
             var rb = pelota.AddComponent<Rigidbody>();
@@ -745,24 +451,33 @@ namespace DinoVehicle.Editor
             rb.angularDamping = 0.25f;
             rb.collisionDetectionMode = CollisionDetectionMode.Continuous;
 
-            var matPelota = new Material(Shader.Find("Standard"));
-            matPelota.color = new Color(0.95f, 0.55f, 0.12f);
-            matPelota.SetFloat("_Glossiness", 0.65f);
-            matPelota.SetFloat("_Metallic", 0.1f);
-            pelota.GetComponent<Renderer>().sharedMaterial = matPelota;
+            pelota.GetComponent<Renderer>().sharedMaterial = MaterialPlano("M_DW_Pelota", new Color(0.95f, 0.55f, 0.12f), 0.65f);
+            if (pelota.GetComponent<DinoBallToy>() == null) pelota.AddComponent<DinoBallToy>();
 
-            if (pelota.GetComponent<DinoBallToy>() == null)
+            // Las rampas y cajas originales de la escena se conservan; solo se crean si no hay ninguna.
+            bool hayRampas = false;
+            foreach (var t in Object.FindObjectsByType<Transform>(FindObjectsInactive.Include))
             {
-                pelota.AddComponent<DinoBallToy>();
+                if (t.name == "Rampa_Salto" && !t.IsChildOf(juguetesParent)) { hayRampas = true; break; }
             }
+            if (hayRampas) return;
 
-            // Rampas de salto
             CrearRampa(new Vector3(0f, 0f, 40f), new Vector3(10f, 2.2f, 12f), 18f, juguetesParent);
             CrearRampa(new Vector3(0f, 0f, 105f), new Vector3(12f, 3.6f, 15f), 24f, juguetesParent);
-
-            // Pirámides de cajas destructibles para demolición física
             CrearPiramideCajas(new Vector3(0f, 0.5f, 72f), 4, juguetesParent);
             CrearPiramideCajas(new Vector3(8f, 0.5f, 140f), 3, juguetesParent);
+        }
+
+        /// <summary>Material Standard guardado como asset (los creados en memoria se pierden al guardar la escena).</summary>
+        static Material MaterialPlano(string nombre, Color color, float brillo)
+        {
+            string ruta = $"Assets/Dino/Materials/{nombre}.mat";
+            var m = AssetDatabase.LoadAssetAtPath<Material>(ruta);
+            if (m != null) return m;
+            m = new Material(Shader.Find("Standard")) { color = color };
+            m.SetFloat("_Glossiness", brillo);
+            AssetDatabase.CreateAsset(m, ruta);
+            return m;
         }
 
         static void CrearRampa(Vector3 pos, Vector3 tam, float angulo, Transform parent)
@@ -773,15 +488,13 @@ namespace DinoVehicle.Editor
             rampa.transform.position = pos + new Vector3(0, tam.y * 0.45f, 0);
             rampa.transform.localScale = tam;
             rampa.transform.rotation = Quaternion.Euler(-angulo, 0f, 0f);
-
-            var mat = new Material(Shader.Find("Standard"));
-            mat.color = new Color(0.68f, 0.48f, 0.28f);
-            rampa.GetComponent<MeshRenderer>().sharedMaterial = mat;
+            rampa.GetComponent<MeshRenderer>().sharedMaterial = MaterialPlano("M_DW_Rampa", new Color(0.68f, 0.48f, 0.28f), 0.2f);
         }
 
         static void CrearPiramideCajas(Vector3 posBase, int filas, Transform parent)
         {
             float tamCaja = 1.0f;
+            var mat = MaterialPlano("M_DW_Caja", new Color(0.78f, 0.58f, 0.36f), 0.15f);
             for (int f = 0; f < filas; f++)
             {
                 int cajasEnFila = filas - f;
@@ -795,12 +508,8 @@ namespace DinoVehicle.Editor
                     caja.transform.SetParent(parent, false);
                     caja.transform.position = new Vector3(posBase.x + inicioX + c * tamCaja, y, posBase.z);
                     caja.transform.localScale = Vector3.one * (tamCaja * 0.95f);
-
                     var rb = caja.AddComponent<Rigidbody>();
                     rb.mass = 25f;
-
-                    var mat = new Material(Shader.Find("Standard"));
-                    mat.color = new Color(0.78f, 0.58f, 0.36f);
                     caja.GetComponent<MeshRenderer>().sharedMaterial = mat;
                 }
             }
@@ -814,8 +523,7 @@ namespace DinoVehicle.Editor
             var vehicle = Object.FindAnyObjectByType<DinoVehicleController>();
             if (vehicle != null)
             {
-                // Asegurar altura sobre el terreno suave
-                var p = vehicle.transform.position;
+                // Asegurar altura sobre el terreno suave (la salida está en la pista plana)
                 vehicle.transform.position = new Vector3(0f, 1.0f, 0f);
                 vehicle.transform.rotation = Quaternion.identity;
 

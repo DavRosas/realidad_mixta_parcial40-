@@ -3,190 +3,268 @@ using UnityEngine;
 namespace DinoVehicle
 {
     /// <summary>
-    /// IA para dinosaurios herbívoros del ecosistema (Estegosaurios, Paquicefalosaurios, Anquilosaurios).
-    /// Pastan pacíficamente en su territorio, caminan lentamente entre áreas de hierba
-    /// y huyen despavoridos si el Carnotauro se acerca a gran velocidad o ruge.
+    /// IA de herbívoros en manada (Estegosaurios, Paquicefalosaurios; Anquilosaurio en modo estático).
+    /// - Vigilar (Idle/Idle2), Pastar (Eat), Beber (Drink) y pasear por su pradera.
+    /// - Los miembros siguen al líder manteniendo su hueco en la formación.
+    /// - Si el jugador se acerca despacio, un adulto lo encara y le advierte con un rugido (Roar).
+    /// - Si se acerca rápido, ruge cerca o el líder huye, toda la manada sale en estampida (Run).
+    /// El desplazamiento usa DinoAIBase: sin patinaje y pegado al terreno.
     /// </summary>
-    public class DinoAIHerbivore : MonoBehaviour
+    public class DinoAIHerbivore : DinoAIBase
     {
-        public enum AIState { Grazing, Walking, Fleeing }
+        public enum AIState { Vigilar, Pastar, Beber, Pasear, Seguir, Advertir, Huir }
 
         [Header("Comportamiento")]
-        [SerializeField] AIState currentState = AIState.Grazing;
-        [SerializeField] float walkSpeed = 2.4f;
-        [SerializeField] float fleeSpeed = 8.5f;
-        [SerializeField] float territoryRadius = 25f;
-        [SerializeField] float fearDistance = 14f;
-        [SerializeField] float roarFearDistance = 35f;
+        [SerializeField] AIState currentState = AIState.Vigilar;
+        [Tooltip("Radio de la pradera alrededor de su centro")]
+        public float territoryRadius = 35f;
+        [Tooltip("Distancia a la que encara al jugador y ruge de advertencia")]
+        public float distanciaAdvertencia = 30f;
+        [Tooltip("Distancia a la que huye aunque el jugador vaya despacio")]
+        public float fearDistance = 13f;
+        [Tooltip("Un rugido del jugador dentro de esta distancia provoca estampida")]
+        public float roarFearDistance = 45f;
+        [Tooltip("Multiplicador de Run en la estampida (animator.speed sube igual: no patina)")]
+        public float multiplicadorHuida = 1.35f;
 
-        Vector3 spawnPosition;
-        Vector3 targetPoint;
-        float stateTimer = 0f;
-        float changeStateCooldown = 6f;
+        [Header("Manada")]
+        public DinoAIHerbivore lider;
+        [Tooltip("Hueco en la formación, relativo al líder (en metros)")]
+        public Vector3 offsetManada;
+        public Vector3 centroTerritorio;
+        public bool centroAsignado;
 
-        Animator animator;
-        Transform playerDino;
-        DinoVehicleController playerController;
+        float timer;
+        float duracion;
+        Vector3 destino;
+        float cooldownAdvertencia;
+        Vector3 dirHuida;
 
-        void Start()
+        public bool Huyendo => currentState == AIState.Huir;
+        public Vector3 DireccionHuida => dirHuida;
+        public AIState Estado => currentState;
+
+        protected override void Start()
         {
-            spawnPosition = transform.position;
-            animator = GetComponentInChildren<Animator>();
-
-            var player = FindAnyObjectByType<DinoVehicleController>();
-            if (player != null)
+            base.Start();
+            if (!centroAsignado)
             {
-                playerController = player;
-                playerDino = player.transform;
+                centroTerritorio = transform.position;
+                centroAsignado = true;
             }
-
-            ElegirNuevoPuntoPasto();
+            // Desfase para que la manada no haga todo al unísono.
+            cooldownAdvertencia = Random.Range(2f, 6f);
+            ElegirActividadQuieta();
+            timer = Random.Range(0f, 3f);
         }
 
         void Update()
         {
-            CheckPlayerProximity();
+            float dt = Time.deltaTime;
+            timer += dt;
+            cooldownAdvertencia -= dt;
+
+            if (estatico)
+            {
+                ComportamientoEstatico();
+                PegarAlSuelo();
+                ActualizarAnimacion();
+                return;
+            }
+
+            EvaluarAmenaza();
 
             switch (currentState)
             {
-                case AIState.Grazing:
-                    stateTimer += Time.deltaTime;
-                    if (stateTimer >= changeStateCooldown)
+                case AIState.Vigilar:
+                case AIState.Pastar:
+                case AIState.Beber:
+                    Frenar();
+                    if (lider != null && LejosDeSuHueco(6f))
                     {
-                        ElegirNuevoPuntoPasto();
-                        currentState = AIState.Walking;
-                        stateTimer = 0f;
+                        Cambiar(AIState.Seguir);
+                    }
+                    else if (timer >= duracion)
+                    {
+                        if (lider == null && Random.value < 0.45f) EmpezarPaseo();
+                        else ElegirActividadQuieta();
                     }
                     break;
 
-                case AIState.Walking:
-                    MoverHacia(targetPoint, walkSpeed);
-                    if (Vector3.Distance(transform.position, targetPoint) < 1.5f)
+                case AIState.Pasear:
+                    Locomover(destino, VelCaminar, 2f);
+                    if (Plano(destino - transform.position).magnitude < 2.5f || timer > 40f)
                     {
-                        currentState = AIState.Grazing;
-                        stateTimer = 0f;
-                        changeStateCooldown = Random.Range(4f, 9f);
+                        ElegirActividadQuieta();
                     }
                     break;
 
-                case AIState.Fleeing:
-                    if (playerDino != null)
-                    {
-                        Vector3 fleeDir = (transform.position - playerDino.position).normalized;
-                        fleeDir.y = 0f;
-                        Vector3 fleeTarget = transform.position + fleeDir * 15f;
-                        MoverHacia(fleeTarget, fleeSpeed);
+                case AIState.Seguir:
+                {
+                    Vector3 hueco = HuecoEnManada();
+                    float dist = Plano(hueco - transform.position).magnitude;
+                    // Si se ha quedado muy atrás trota (Run) para alcanzar al grupo.
+                    float vel = dist > 18f ? VelCorrer * 0.8f : VelCaminar * Mathf.Lerp(0.8f, 1.15f, Mathf.InverseLerp(3f, 12f, dist));
+                    Locomover(hueco, vel, 1.5f);
+                    if (dist < 2f && velActual < 0.2f) ElegirActividadQuieta();
+                    break;
+                }
 
-                        // Si ya se alejó lo suficiente, calmarse
-                        if (Vector3.Distance(transform.position, playerDino.position) > fearDistance * 1.8f)
-                        {
-                            currentState = AIState.Grazing;
-                            stateTimer = 0f;
-                        }
+                case AIState.Advertir:
+                    if (AccionEnCurso)
+                    {
+                        Frenar();
+                    }
+                    else if (duracion < 0f && AlineacionCon(PosJugador) < 0.85f && timer < 3f)
+                    {
+                        // Primero encara al jugador andando despacio (sin pivotar en seco).
+                        Locomover(PosJugador, VelCaminar * 0.5f, 0f);
+                    }
+                    else if (duracion < 0f)
+                    {
+                        Frenar();
+                        duracion = 0f;
+                        IniciarAccion("Roar", 4f);
                     }
                     else
                     {
-                        currentState = AIState.Grazing;
+                        Frenar();
+                        ElegirActividadQuieta(AIState.Vigilar);
                     }
                     break;
-            }
 
-            ActualizarAnimacion();
-        }
-
-        void CheckPlayerProximity()
-        {
-            if (playerDino == null || playerController == null) return;
-
-            float dist = Vector3.Distance(transform.position, playerDino.position);
-
-            // Reacción a rugido a mayor distancia
-            if (playerController.IsRoaring && dist < roarFearDistance)
-            {
-                currentState = AIState.Fleeing;
-                return;
-            }
-
-            // Reacción a velocidad alta si se acerca
-            bool playerIsFast = playerController.CurrentSpeedKmh > 18f;
-            if (dist < (playerIsFast ? fearDistance * 1.3f : fearDistance * 0.7f))
-            {
-                currentState = AIState.Fleeing;
-            }
-        }
-
-        void ElegirNuevoPuntoPasto()
-        {
-            Vector2 randomCircle = Random.insideUnitCircle * territoryRadius;
-            targetPoint = spawnPosition + new Vector3(randomCircle.x, 0, randomCircle.y);
-            targetPoint.y = transform.position.y;
-        }
-
-        void MoverHacia(Vector3 target, float speed)
-        {
-            Vector3 dir = (target - transform.position);
-            dir.y = 0f;
-
-            if (dir.sqrMagnitude > 0.05f)
-            {
-                Quaternion rot = Quaternion.LookRotation(dir);
-                transform.rotation = Quaternion.Slerp(transform.rotation, rot, Time.deltaTime * 3.5f);
-                transform.position += transform.forward * speed * Time.deltaTime;
-            }
-        }
-
-        bool animPreparada;
-        bool tieneSpeed;
-        string estadoAnim;
-
-        void ActualizarAnimacion()
-        {
-            if (animator == null || !animator.isActiveAndEnabled || animator.runtimeAnimatorController == null) return;
-
-            if (!animPreparada)
-            {
-                // Se consulta una sola vez: animator.parameters crea un array nuevo en cada llamada.
-                animPreparada = true;
-                foreach (var p in animator.parameters)
+                case AIState.Huir:
                 {
-                    if (p.name == "Speed" && p.type == AnimatorControllerParameterType.Float) tieneSpeed = true;
+                    if (lider != null && lider.Huyendo)
+                    {
+                        dirHuida = Vector3.Slerp(dirHuida, lider.DireccionHuida, dt * 2f).normalized;
+                    }
+                    else if (jugador != null && timer % 2f < dt)
+                    {
+                        dirHuida = Vector3.Slerp(dirHuida, Plano(transform.position - PosJugador).normalized, 0.6f).normalized;
+                    }
+
+                    Vector3 objetivo = transform.position + dirHuida * 25f;
+                    // En estampida los de atrás conservan su hueco lateral.
+                    if (lider != null && lider.Huyendo) objetivo = Vector3.Lerp(objetivo, HuecoEnManada() + dirHuida * 20f, 0.5f);
+                    Locomover(objetivo, VelCorrer * multiplicadorHuida, 0.5f);
+
+                    bool seguro = DistanciaJugador() > fearDistance * 3f && timer > 5f;
+                    if ((lider == null && seguro) || (lider != null && !lider.Huyendo && timer > 3f))
+                    {
+                        if (lider == null) centroTerritorio = Vector3.Lerp(centroTerritorio, transform.position, 0.5f);
+                        ElegirActividadQuieta(AIState.Vigilar);
+                    }
+                    break;
                 }
             }
 
-            if (tieneSpeed)
+            PegarAlSuelo();
+            ActualizarAnimacion();
+        }
+
+        void EvaluarAmenaza()
+        {
+            if (jugador == null || currentState == AIState.Huir) return;
+
+            float dist = DistanciaJugador();
+            bool rapido = jugador.CurrentSpeedKmh > 18f;
+            bool rugidoCerca = jugador.IsRoaring && dist < roarFearDistance;
+            bool liderHuye = lider != null && lider.Huyendo;
+
+            if (rugidoCerca || liderHuye || dist < (rapido ? fearDistance * 1.6f : fearDistance))
             {
-                float speedValue = 0f;
-                if (currentState == AIState.Walking) speedValue = 0.4f;
-                else if (currentState == AIState.Fleeing) speedValue = 1.0f;
-                animator.SetFloat("Speed", speedValue);
+                CancelarAccion();
+                dirHuida = liderHuye ? lider.DireccionHuida : Plano(transform.position - PosJugador).normalized;
+                if (dirHuida.sqrMagnitude < 0.01f) dirHuida = -Frente;
+                Cambiar(AIState.Huir);
                 return;
             }
 
-            // Si no tiene parámetro Speed, alternar estados
-            string deseado = null;
-            if (currentState == AIState.Fleeing)
+            // Advertencia: solo si está tranquilo y no ha rugido hace poco.
+            if (currentState != AIState.Advertir && dist < distanciaAdvertencia && cooldownAdvertencia <= 0f)
             {
-                if (TieneEstado("Run")) deseado = "Run";
-                else if (TieneEstado("Walk")) deseado = "Walk";
+                cooldownAdvertencia = Random.Range(10f, 16f);
+                Cambiar(AIState.Advertir);
+                duracion = -1f; // marca "aún no ha rugido"
             }
-            else if (currentState == AIState.Walking)
-            {
-                if (TieneEstado("Walk")) deseado = "Walk";
-            }
-            else
-            {
-                if (TieneEstado("Idle")) deseado = "Idle";
-            }
-
-            // Solo al cambiar: repetir CrossFade cada frame congela la animación.
-            if (deseado == null || deseado == estadoAnim) return;
-            estadoAnim = deseado;
-            animator.CrossFade(deseado, 0.2f);
         }
 
-        bool TieneEstado(string stateName)
+        void ComportamientoEstatico()
         {
-            return animator.HasState(0, Animator.StringToHash(stateName));
+            // Vigilante: alterna Idle / Idle2 y ruge si el jugador se acerca. Nunca se desplaza.
+            Frenar();
+            if (jugador != null && DistanciaJugador() < distanciaAdvertencia && cooldownAdvertencia <= 0f && !AccionEnCurso)
+            {
+                cooldownAdvertencia = 12f;
+                IniciarAccion("Roar", 4f);
+            }
+            if (timer >= duracion)
+            {
+                timer = 0f;
+                duracion = Random.Range(5f, 10f);
+                animQuieta = Random.value < 0.5f ? "Idle" : "Idle2";
+            }
+        }
+
+        void ElegirActividadQuieta(AIState? forzado = null)
+        {
+            AIState s;
+            if (forzado.HasValue) s = forzado.Value;
+            else
+            {
+                float r = Random.value;
+                s = r < 0.45f ? AIState.Pastar : (r < 0.62f ? AIState.Beber : AIState.Vigilar);
+            }
+
+            Cambiar(s);
+            switch (s)
+            {
+                case AIState.Pastar:
+                    animQuieta = "Eat";
+                    duracion = Random.Range(6f, 13f);
+                    break;
+                case AIState.Beber:
+                    animQuieta = "Drink";
+                    duracion = Random.Range(5f, 9f);
+                    break;
+                default:
+                    animQuieta = Random.value < 0.6f ? "Idle" : "Idle2";
+                    duracion = Random.Range(4f, 9f);
+                    break;
+            }
+        }
+
+        void EmpezarPaseo()
+        {
+            Vector2 c = Random.insideUnitCircle * territoryRadius;
+            destino = centroTerritorio + new Vector3(c.x, 0f, c.y);
+            animQuieta = "Idle";
+            Cambiar(AIState.Pasear);
+        }
+
+        Vector3 HuecoEnManada()
+        {
+            if (lider == null) return transform.position;
+            Quaternion rumbo = Quaternion.Euler(0f, lider.yaw, 0f);
+            return lider.transform.position + rumbo * offsetManada;
+        }
+
+        bool LejosDeSuHueco(float margen)
+        {
+            return Plano(HuecoEnManada() - transform.position).magnitude > margen;
+        }
+
+        void Cambiar(AIState s)
+        {
+            currentState = s;
+            timer = 0f;
+        }
+
+        static Vector3 Plano(Vector3 v)
+        {
+            v.y = 0f;
+            return v;
         }
     }
 }
